@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Application specific
+uploads/
+results/
+logs/
+.env
+
+# OS generated files
+.DS_Store
+Thumbs.db

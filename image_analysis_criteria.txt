@@ -1,0 +1,47 @@
+Image Analysis Criteria for Morphing & Fake Detection System
+============================================================
+
+The system uses a multi-layered approach to evaluate whether an image is Real, Suspicious, or Fake. Each analysis module contributes to an overall score based on specific criteria. The weights for the final score are:
+- ELA (Error Level Analysis): 25%
+- CNN Classification: 25%
+- EXIF Metadata: 20%
+- Noise Analysis: 15%
+- Copy-Move Forgery Detection: 15%
+
+Global Thresholds:
+- FAKE_THRESHOLD: Overall score >= 80
+- SUSPICION_THRESHOLD: Overall score >= 60
+(Below 60 is considered REAL)
+
+Here are the detailed criteria for each module:
+
+1. Error Level Analysis (ELA)
+   - Technique: Re-saves the image at 90 JPEG quality and compares pixel differences with the original. Differences are amplified by a factor of 10.
+   - Criteria: Computes the mean and standard deviation of the amplified difference.
+   - Scoring Logic: Score is calculated based on the standard deviation and the ratio of standard deviation to the mean. High variance (score higher than SUSPICION_THRESHOLD) suggests possible editing since it indicates different compression levels across the image.
+
+2. Noise Analysis
+   - Technique: Applies a Gaussian high-pass filter to extract the noise residual from the image.
+   - Criteria: Splits the noise residual into 32x32 blocks and calculates the noise variance in each block.
+   - Scoring Logic: The coefficient of variation (CV = std_dev / mean) of the block variances is computed. A high CV score indicates inconsistent noise patterns (incompatible noise signatures between different parts of the image), suggesting tampering. 
+
+3. EXIF Metadata Inspection
+   - Technique: Extracts EXIF tags from the image to look for anomalies.
+   - Criteria:
+     * Missing EXIF Data: Adds 15 to the score (common for digital certificates or screenshots).
+     * Editing Software Signatures: Checks if known editing software (e.g., Photoshop, GIMP, Canva, Adobe) is listed in 'Software' or 'ProcessingSoftware' tags (adds 30 to score).
+     * Size Mismatch: Checks if the image dimensions in EXIF match the actual dimensions (adds 20 to score).
+     * Missing Camera Info: Checks if 'Make' and 'Model' tags are missing (adds 5 to score).
+     * Format Mismatch: Checks if the file extension matches the actual image format (adds 15 to score).
+   - Scoring Logic: Maximum score is capped at 100 based on the accumulated penalty flags.
+
+4. Copy-Move Forgery Detection
+   - Technique: Performs block-based (32x32 blocks, stride 16) matching using Discrete Cosine Transform (DCT) features to find duplicated regions.
+   - Criteria: Extracts the top-left 16x16 DCT coefficients from each block and looks for blocks with a high degree of similarity (difference < 15) that are physically separated by at least 80 pixels.
+   - Scoring Logic: Evaluates the number of matched pairs. The score is calculated as (matched_pairs / 100) * 100, capped at 100. Over 100 matches likely indicates copy-paste forgery.
+
+5. CNN-based Classification
+   - Technique: Passes the image through a lightweight Convolutional Neural Network (CNN) OR a heuristic fallback if TensorFlow is unavailable.
+   - Criteria: The CNN classifies the image into one of three classes: "Original", "Edited", or "Morphed/Fake".
+     * Fallback Heuristics (if CNN unavailable): Analyzes noise level, Laplacian variance (blur detection), edge density, and color channel correlation to estimate probabilities.
+   - Scoring Logic: The score is an inverse of the model's confidence that the image is "Original" (Score = 100 - Original Confidence %).
