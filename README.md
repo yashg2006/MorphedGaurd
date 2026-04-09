@@ -37,7 +37,8 @@ When you upload an image (like a digital certificate), the backend spins up a fe
 - Analyze image noise variance
 - Pass the file to a CNN to classify if it looks morphed
 
-It combines these heuristics to calculate an overall "suspicion score". If the score crosses a certain threshold, the system flags the file as a potential fake.
+
+It combines these heuristics to calculate an overall "suspicion score". If the score crosses a certain threshold which is set to 50 currently, the system flags the file as a potential fake.
 
 Created by YASH. 
 contact for more details
