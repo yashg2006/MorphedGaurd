@@ -40,6 +40,6 @@ When you upload an image (like a digital certificate), the backend spins up a fe
 
 It combines these heuristics to calculate an overall "suspicion score". If the score crosses a certain threshold which is set to 50 currently, the system flags the file as a potential fake.
 
-Created by YASH. 
+Created by Yash Gharat and Dhanika Bhat.
 contact for more details
 
