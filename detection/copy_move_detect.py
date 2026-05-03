@@ -64,22 +64,25 @@ def perform_copy_move_detection(image_path: str) -> dict:
     match_mask = np.zeros((h, w), dtype=np.uint8)
 
     for i in range(len(sorted_blocks) - 1):
-        diff = np.sum(np.abs(sorted_blocks[i] - sorted_blocks[i + 1]))
+        # Check a small window of adjacent blocks to find more matches
+        # since similar blocks might not be exactly adjacent after sorting
+        for j in range(1, min(6, len(sorted_blocks) - i)):
+            diff = np.sum(np.abs(sorted_blocks[i] - sorted_blocks[i + j]))
 
-        if diff < 15:  # Tight similarity threshold to avoid false positives
-            p1 = sorted_positions[i]
-            p2 = sorted_positions[i + 1]
-            distance = np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+            if diff < 15:  # Tight similarity threshold to avoid false positives
+                p1 = sorted_positions[i]
+                p2 = sorted_positions[i + j]
+                distance = np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
 
-            if distance > min_distance:
-                matched_pairs += 1
-                # Mark matched regions
-                cv2.rectangle(match_mask,
-                              (p1[0], p1[1]),
-                              (p1[0] + block_size, p1[1] + block_size), 255, -1)
-                cv2.rectangle(match_mask,
-                              (p2[0], p2[1]),
-                              (p2[0] + block_size, p2[1] + block_size), 255, -1)
+                if distance > min_distance:
+                    matched_pairs += 1
+                    # Mark matched regions
+                    cv2.rectangle(match_mask,
+                                  (p1[0], p1[1]),
+                                  (p1[0] + block_size, p1[1] + block_size), 255, -1)
+                    cv2.rectangle(match_mask,
+                                  (p2[0], p2[1]),
+                                  (p2[0] + block_size, p2[1] + block_size), 255, -1)
 
     # ── Highlight matched regions on result image ─────
     if matched_pairs > 0:
