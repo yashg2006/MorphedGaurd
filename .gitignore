@@ -8,6 +8,9 @@ uploads/
 results/
 logs/
 .env
+*.db
+*.sqlite
+*.sqlite3
 
 # OS generated files
 .DS_Store

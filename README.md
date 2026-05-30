@@ -7,6 +7,7 @@ It checks things under the hood like EXIF data, Error Level Analysis (ELA), nois
 ## Tech stack
 - Python / Flask for the backend server
 - TensorFlow, OpenCV, and Scikit-image for the deep learning / image processing stuff
+- SQLAlchemy with SQLite locally or PostgreSQL in deployment
 - HTML/CSS/JS for the frontend interface
 
 ## How to run it locally
@@ -38,3 +39,22 @@ When you upload an image (like a digital certificate), the backend spins up a fe
 - Pass the file to a CNN to classify if it looks morphed
 
 It combines these heuristics to calculate an overall "suspicion score". If the score crosses a certain threshold, the system flags the file as a potential fake.
+
+## Deployment
+
+This repo includes `render.yaml` and a `Procfile` for deployment. The Render
+Blueprint provisions:
+
+- a Flask web service started with Gunicorn
+- a managed PostgreSQL database injected as `DATABASE_URL`
+- a `/healthz` health check endpoint
+
+Before deploying, set `SECRET_KEY` in the Render Dashboard. See
+`DEPLOYMENT_REVIEW.md` for the deployment checklist, security notes, and model
+readiness review.
+
+## Model note
+
+The app only uses CNN predictions when trained weights are available at
+`models/cnn_weights.h5` or `MODEL_WEIGHTS_PATH`. Without trained weights, it
+uses a transparent heuristic fallback and reports that status in `/healthz`.

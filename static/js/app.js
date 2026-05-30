@@ -15,6 +15,22 @@ const state = {
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
+function escapeHTML(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+    }[ch]));
+}
+
+function clampScore(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 0;
+    return Math.max(0, Math.min(100, numeric));
+}
+
 // ── Init ─────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     initParticles();
@@ -107,7 +123,7 @@ function initUpload() {
 function handleFiles(files) {
     const valid = files.filter(f => {
         const ext = f.name.split('.').pop().toLowerCase();
-        return ['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'pdf'].includes(ext);
+        return ['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'tif'].includes(ext);
     });
 
     if (valid.length === 0) return;
@@ -313,11 +329,14 @@ function renderResults() {
 }
 
 function createResultCard(result) {
-    const verdict = result.verdict || 'UNKNOWN';
-    const score = result.overall_score || 0;
-    const confidence = result.confidence || 0;
+    const allowedVerdicts = ['REAL', 'SUSPICIOUS', 'FAKE', 'ERROR'];
+    const verdict = allowedVerdicts.includes(result.verdict) ? result.verdict : 'UNKNOWN';
+    const score = clampScore(result.overall_score);
+    const confidence = clampScore(result.confidence);
     const analyses = result.analyses || {};
-    const elapsed = result.elapsed_seconds || 0;
+    const elapsed = escapeHTML(result.elapsed_seconds || 0);
+    const safeFilename = escapeHTML(result.filename || result.task_id || 'Unknown file');
+    const safeTaskId = escapeHTML(result.task_id || '');
 
     // Score circle calculations
     const circumference = 2 * Math.PI * 52;
@@ -326,11 +345,11 @@ function createResultCard(result) {
 
     // Bar data
     const bars = [
-        { name: 'ELA', score: analyses.ela?.score || 0 },
-        { name: 'Noise', score: analyses.noise?.score || 0 },
-        { name: 'EXIF', score: analyses.exif?.score || 0 },
-        { name: 'Copy-Move', score: analyses.copy_move?.score || 0 },
-        { name: 'CNN AI', score: analyses.cnn?.score || 0 },
+        { name: 'ELA', score: clampScore(analyses.ela?.score) },
+        { name: 'Noise', score: clampScore(analyses.noise?.score) },
+        { name: 'EXIF', score: clampScore(analyses.exif?.score) },
+        { name: 'Copy-Move', score: clampScore(analyses.copy_move?.score) },
+        { name: 'CNN AI', score: clampScore(analyses.cnn?.score) },
     ];
 
     const barHTML = bars.map(b => {
@@ -349,6 +368,7 @@ function createResultCard(result) {
     const detailCards = [];
 
     if (analyses.ela) {
+        const elaScore = clampScore(analyses.ela.score);
         let imgHtml = analyses.ela.image
             ? `<img class="analysis-detail-image" src="data:image/png;base64,${analyses.ela.image}" alt="ELA Heatmap">`
             : '';
@@ -356,14 +376,15 @@ function createResultCard(result) {
             <div class="analysis-detail-card">
                 <div class="analysis-detail-header">
                     <span class="analysis-detail-title">🔥 Error Level Analysis</span>
-                    <span class="analysis-detail-score" style="color: ${analyses.ela.score < 40 ? '#00f5d4' : '#fbbf24'}">${analyses.ela.score}/100</span>
+                    <span class="analysis-detail-score" style="color: ${elaScore < 40 ? '#00f5d4' : '#fbbf24'}">${elaScore}/100</span>
                 </div>
-                <p class="analysis-detail-text">${analyses.ela.details || ''}</p>
+                <p class="analysis-detail-text">${escapeHTML(analyses.ela.details || '')}</p>
                 ${imgHtml}
             </div>`);
     }
 
     if (analyses.noise) {
+        const noiseScore = clampScore(analyses.noise.score);
         let imgHtml = analyses.noise.image
             ? `<img class="analysis-detail-image" src="data:image/png;base64,${analyses.noise.image}" alt="Noise Map">`
             : '';
@@ -371,29 +392,31 @@ function createResultCard(result) {
             <div class="analysis-detail-card">
                 <div class="analysis-detail-header">
                     <span class="analysis-detail-title">📡 Noise Analysis</span>
-                    <span class="analysis-detail-score" style="color: ${analyses.noise.score < 40 ? '#00f5d4' : '#fbbf24'}">${analyses.noise.score}/100</span>
+                    <span class="analysis-detail-score" style="color: ${noiseScore < 40 ? '#00f5d4' : '#fbbf24'}">${noiseScore}/100</span>
                 </div>
-                <p class="analysis-detail-text">${analyses.noise.details || ''}</p>
+                <p class="analysis-detail-text">${escapeHTML(analyses.noise.details || '')}</p>
                 ${imgHtml}
             </div>`);
     }
 
     if (analyses.exif) {
+        const exifScore = clampScore(analyses.exif.score);
         const flagsHtml = (analyses.exif.flags || []).map(f =>
-            `<span class="exif-flag">${f}</span>`
+            `<span class="exif-flag">${escapeHTML(f)}</span>`
         ).join('');
         detailCards.push(`
             <div class="analysis-detail-card">
                 <div class="analysis-detail-header">
                     <span class="analysis-detail-title">📋 EXIF Metadata</span>
-                    <span class="analysis-detail-score" style="color: ${analyses.exif.score < 40 ? '#00f5d4' : '#fbbf24'}">${analyses.exif.score}/100</span>
+                    <span class="analysis-detail-score" style="color: ${exifScore < 40 ? '#00f5d4' : '#fbbf24'}">${exifScore}/100</span>
                 </div>
-                <p class="analysis-detail-text">${analyses.exif.details || ''}</p>
+                <p class="analysis-detail-text">${escapeHTML(analyses.exif.details || '')}</p>
                 <div class="exif-flags">${flagsHtml}</div>
             </div>`);
     }
 
     if (analyses.copy_move) {
+        const copyMoveScore = clampScore(analyses.copy_move.score);
         let imgHtml = analyses.copy_move.image
             ? `<img class="analysis-detail-image" src="data:image/png;base64,${analyses.copy_move.image}" alt="Copy-Move Detection">`
             : '';
@@ -401,31 +424,32 @@ function createResultCard(result) {
             <div class="analysis-detail-card">
                 <div class="analysis-detail-header">
                     <span class="analysis-detail-title">🔍 Copy-Move Detection</span>
-                    <span class="analysis-detail-score" style="color: ${analyses.copy_move.score < 40 ? '#00f5d4' : '#fbbf24'}">${analyses.copy_move.score}/100</span>
+                    <span class="analysis-detail-score" style="color: ${copyMoveScore < 40 ? '#00f5d4' : '#fbbf24'}">${copyMoveScore}/100</span>
                 </div>
-                <p class="analysis-detail-text">${analyses.copy_move.details || ''}</p>
+                <p class="analysis-detail-text">${escapeHTML(analyses.copy_move.details || '')}</p>
                 ${imgHtml}
             </div>`);
     }
 
     if (analyses.cnn) {
         const cnnConf = analyses.cnn.confidence || {};
-        const confHtml = Object.entries(cnnConf).map(([label, pct]) =>
-            `<div class="analysis-bar-row">
-                <span class="analysis-bar-label" style="width:120px">${label}</span>
+        const confHtml = Object.entries(cnnConf).map(([label, pct]) => {
+            const safePct = clampScore(pct);
+            return `<div class="analysis-bar-row">
+                <span class="analysis-bar-label" style="width:120px">${escapeHTML(label)}</span>
                 <div class="analysis-bar-track">
-                    <div class="analysis-bar-fill bar-low" style="width: ${pct}%"></div>
+                    <div class="analysis-bar-fill bar-low" style="width: ${safePct}%"></div>
                 </div>
-                <span class="analysis-bar-score">${pct}%</span>
-            </div>`
-        ).join('');
+                <span class="analysis-bar-score">${safePct}%</span>
+            </div>`;
+        }).join('');
         detailCards.push(`
             <div class="analysis-detail-card">
                 <div class="analysis-detail-header">
                     <span class="analysis-detail-title">🤖 CNN Classification</span>
-                    <span class="analysis-detail-score">${analyses.cnn.label}</span>
+                    <span class="analysis-detail-score">${escapeHTML(analyses.cnn.label || 'Unknown')}</span>
                 </div>
-                <p class="analysis-detail-text">${analyses.cnn.details || ''}</p>
+                <p class="analysis-detail-text">${escapeHTML(analyses.cnn.details || '')}</p>
                 ${confHtml}
             </div>`);
     }
@@ -434,8 +458,8 @@ function createResultCard(result) {
     <div class="result-card">
         <div class="result-header">
             <div>
-                <div class="result-filename">${result.filename || result.task_id}</div>
-                <div class="result-time">Task: ${result.task_id} • ${elapsed}s</div>
+                <div class="result-filename">${safeFilename}</div>
+                <div class="result-time">Task: ${safeTaskId} • ${elapsed}s</div>
             </div>
             <span class="verdict-badge verdict-${verdict}">${verdict}</span>
         </div>

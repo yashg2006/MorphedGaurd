@@ -7,12 +7,17 @@ import time
 import json
 import shutil
 import logging
+import uuid
 from datetime import datetime
 from typing import Optional
+
+from PIL import Image, UnidentifiedImageError
+from werkzeug.utils import secure_filename
 
 import config
 
 logger = logging.getLogger("FileManager")
+Image.MAX_IMAGE_PIXELS = config.MAX_IMAGE_PIXELS
 
 
 class FileManager:
@@ -54,10 +59,9 @@ class FileManager:
         Returns:
             Full path to the saved file
         """
-        # Sanitize filename
         safe_name = self._sanitize_filename(filename)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        unique_name = f"{timestamp}_{safe_name}"
+        unique_name = f"{timestamp}_{uuid.uuid4().hex[:12]}_{safe_name}"
         filepath = os.path.join(config.UPLOAD_DIR, unique_name)
 
         file_storage.save(filepath)
@@ -109,14 +113,41 @@ class FileManager:
 
     def _sanitize_filename(self, filename: str) -> str:
         """Remove potentially dangerous characters from filenames."""
-        keepcharacters = (' ', '.', '_', '-')
-        return "".join(c for c in filename
-                       if c.isalnum() or c in keepcharacters).strip()
+        safe_name = secure_filename(filename or "")
+        return safe_name or f"upload_{uuid.uuid4().hex}"
 
     def is_allowed_file(self, filename: str) -> bool:
         """Check if a file has an allowed extension."""
         ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
         return ext in config.ALLOWED_EXTENSIONS
+
+    def is_allowed_mimetype(self, mimetype: str) -> bool:
+        """Check browser-provided MIME type when available."""
+        if not mimetype:
+            return True
+        if mimetype.lower() == "application/octet-stream":
+            return True
+        return mimetype.lower() in config.ALLOWED_MIME_TYPES
+
+    def validate_saved_upload(self, filepath: str) -> tuple[bool, str]:
+        """Verify the saved file is a real image supported by the pipeline."""
+        ext = os.path.splitext(filepath)[1].lstrip(".").lower()
+        if ext not in config.ALLOWED_EXTENSIONS:
+            return False, "Unsupported file extension."
+
+        try:
+            with Image.open(filepath) as img:
+                img.verify()
+                img_format = (img.format or "").lower()
+        except Image.DecompressionBombError:
+            return False, "Image dimensions are too large."
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            return False, f"Invalid image file: {exc}"
+
+        allowed_formats = {"jpeg", "png", "bmp", "tiff"}
+        if img_format not in allowed_formats:
+            return False, f"Unsupported image format: {img_format or 'unknown'}."
+        return True, ""
 
     def get_directory_stats(self) -> dict:
         """Get statistics about managed directories."""

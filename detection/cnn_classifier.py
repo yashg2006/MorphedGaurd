@@ -2,8 +2,8 @@
 CNN-based Image Classifier — classifies images as Original, Edited, or Morphed/Fake
 using a lightweight Convolutional Neural Network.
 
-NOTE: On first run, this builds a small CNN and uses random weights for demo.
-For production, replace with a properly trained model.
+NOTE: A trained weights file is required for CNN predictions. Without one,
+the module falls back to a transparent heuristic instead of random weights.
 """
 import numpy as np
 import cv2
@@ -17,6 +17,10 @@ _model = None
 def _build_model():
     """Build a lightweight CNN for three-class image classification."""
     try:
+        weights_path = config.MODEL_WEIGHTS_PATH
+        if not os.path.exists(weights_path) and not config.ALLOW_UNTRAINED_CNN:
+            return None
+
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
         import tensorflow as tf
         tf.get_logger().setLevel('ERROR')
@@ -41,8 +45,6 @@ def _build_model():
                       loss='categorical_crossentropy',
                       metrics=['accuracy'])
 
-        # Check for pre-trained weights
-        weights_path = os.path.join(config.MODEL_DIR, "cnn_weights.h5")
         if os.path.exists(weights_path):
             model.load_weights(weights_path)
 
@@ -83,6 +85,8 @@ def perform_cnn_classification(image_path: str) -> dict:
     img_normalized = img_resized.astype(np.float32) / 255.0
     img_batch = np.expand_dims(img_normalized, axis=0)
 
+    using_trained_model = model is not None and os.path.exists(config.MODEL_WEIGHTS_PATH)
+
     if model is not None:
         try:
             predictions = model.predict(img_batch, verbose=0)[0]
@@ -104,14 +108,35 @@ def perform_cnn_classification(image_path: str) -> dict:
     # Score: how suspicious (inverse of "Original" confidence)
     score = int(100 - confidence["Original"])
 
+    detail_prefix = "CNN classification"
+    if not using_trained_model:
+        detail_prefix = "Heuristic fallback (no trained CNN weights found)"
+
     return {
         "label": label,
         "confidence": confidence,
         "score": score,
-        "details": f"CNN classification: {label} "
+        "details": f"{detail_prefix}: {label} "
                    f"(Original: {confidence['Original']}%, "
                    f"Edited: {confidence['Edited']}%, "
                    f"Morphed: {confidence['Morphed/Fake']}%)"
+    }
+
+
+def get_model_status() -> dict:
+    """Report model readiness without forcing TensorFlow to load."""
+    weights_path = config.MODEL_WEIGHTS_PATH
+    if os.path.exists(weights_path):
+        return {
+            "mode": "cnn",
+            "weights_path": weights_path,
+            "trained_weights_present": True,
+        }
+    return {
+        "mode": "heuristic_fallback",
+        "weights_path": weights_path,
+        "trained_weights_present": False,
+        "warning": "No trained CNN weights found; predictions are not production-grade.",
     }
 
 
@@ -140,7 +165,10 @@ def _heuristic_classify(image_path: str) -> np.ndarray:
 
     # Color channel correlation
     b, g, r = cv2.split(img)
-    rg_corr = np.corrcoef(r.flatten()[:1000], g.flatten()[:1000])[0, 1]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rg_corr = np.corrcoef(r.flatten()[:1000], g.flatten()[:1000])[0, 1]
+    if not np.isfinite(rg_corr):
+        rg_corr = 1.0
 
     # ── Simple scoring heuristic ──────────────────────
     original_score = 0.5

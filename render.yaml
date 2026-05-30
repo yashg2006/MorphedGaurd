@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: morphguard
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 180 app:app
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: FLASK_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: morphguard-db
+          property: connectionString
+      - key: SECRET_KEY
+        sync: false
+      - key: MAX_CONTENT_LENGTH
+        value: 52428800
+      - key: MAX_IMAGE_PIXELS
+        value: 36000000
+
+databases:
+  - name: morphguard-db
+    databaseName: morphguard
+    user: morphguard
+    plan: free

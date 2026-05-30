@@ -1,7 +1,10 @@
 flask==3.0.0
-pillow==10.2.0
-numpy==1.26.3
-opencv-python-headless==4.9.0.80
-scikit-image==0.22.0
+gunicorn==21.2.0
+SQLAlchemy==2.0.29
+psycopg[binary]>=3.2.10
+pillow>=10.0.0
+numpy>=2.1.0
+opencv-python-headless>=4.9.0.80
+scikit-image>=0.22.0
 piexif==1.1.3
-tensorflow==2.15.0
+tensorflow>=2.17.0  # works on Render (Python 3.11.9); not available locally on Python 3.14

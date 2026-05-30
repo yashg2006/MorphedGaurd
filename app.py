@@ -12,20 +12,23 @@ import json
 import logging
 import threading
 import base64
+import re
 from datetime import datetime
 
 import cv2
 import numpy as np
 from flask import Flask, request, jsonify, render_template, send_file
+from werkzeug.exceptions import RequestEntityTooLarge
 from PIL import Image
 
 import config
+from database import DatabaseManager
 from file_manager import FileManager
 from detection.ela_analysis import perform_ela
 from detection.noise_analysis import perform_noise_analysis
 from detection.exif_analysis import perform_exif_analysis
 from detection.copy_move_detect import perform_copy_move_detection
-from detection.cnn_classifier import perform_cnn_classification
+from detection.cnn_classifier import perform_cnn_classification, get_model_status
 
 from os_concepts.thread_manager import ThreadManager
 from os_concepts.ipc_manager import IPCManager
@@ -34,6 +37,9 @@ from os_concepts.memory_manager import MemoryManager
 from os_concepts.deadlock_handler import DeadlockHandler
 
 # ── Logging Setup ─────────────────────────────────────────
+for required_dir in (config.UPLOAD_DIR, config.RESULTS_DIR, config.LOGS_DIR, config.MODEL_DIR):
+    os.makedirs(required_dir, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -50,9 +56,11 @@ app = Flask(__name__,
             static_folder="static",
             template_folder="templates")
 app.config["MAX_CONTENT_LENGTH"] = config.MAX_CONTENT_LENGTH
+app.config["SECRET_KEY"] = config.SECRET_KEY
 
 # ── Initialize OS Concepts Managers ──────────────────────
 file_mgr = FileManager()
+db_mgr = DatabaseManager(config.DATABASE_URL)
 thread_mgr = ThreadManager()
 ipc_mgr = IPCManager()
 sync_mgr = SyncManager()
@@ -67,6 +75,8 @@ deadlock_handler.register_resource("log_file", order=3)
 # ── In-memory results store ──────────────────────────────
 analysis_results = {}  # task_id -> results dict
 results_lock = threading.Lock()
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+ANALYSIS_IMAGE_TYPES = {"ela", "noise", "copy_move"}
 
 
 def encode_image_base64(img_array) -> str:
@@ -79,7 +89,37 @@ def encode_image_base64(img_array) -> str:
     return ""
 
 
-def analyze_image(image_path: str, task_id: str) -> dict:
+def is_valid_task_id(task_id: str) -> bool:
+    """Keep URL parameters inside the expected task-id shape."""
+    return bool(TASK_ID_RE.fullmatch(task_id or ""))
+
+
+def save_validated_upload(file_storage) -> str:
+    """Save an uploaded image only after extension, MIME, and image checks."""
+    if not file_mgr.is_allowed_file(file_storage.filename):
+        accepted = ", ".join(sorted(config.ALLOWED_EXTENSIONS))
+        raise ValueError(f"File type not allowed. Accepted: {accepted}")
+
+    if not file_mgr.is_allowed_mimetype(file_storage.mimetype):
+        raise ValueError("Uploaded file MIME type is not an allowed image type.")
+
+    filepath = file_mgr.save_upload(file_storage, file_storage.filename)
+    is_valid, reason = file_mgr.validate_saved_upload(filepath)
+    if not is_valid:
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+        raise ValueError(reason)
+    return filepath
+
+
+def analyze_image(
+    image_path: str,
+    task_id: str,
+    filename: str | None = None,
+    batch_id: str | None = None,
+) -> dict:
     """
     Run the full detection pipeline on a single image.
 
@@ -95,10 +135,28 @@ def analyze_image(image_path: str, task_id: str) -> dict:
     # ── Update IPC shared memory ──────────────────────
     ipc_mgr.shared_memory.increment_active()
     ipc_mgr.task_queue.send({"task_id": task_id, "action": "analyze", "path": image_path})
+    slot_acquired = False
+    resources_acquired = False
 
     # ── Acquire semaphore slot (Synchronization) ──────
-    if not sync_mgr.acquire_analysis_slot():
-        return {"error": "System busy — semaphore timeout", "task_id": task_id}
+    slot_acquired = sync_mgr.acquire_analysis_slot()
+    if not slot_acquired:
+        error_result = {
+            "task_id": task_id,
+            "batch_id": batch_id,
+            "filename": filename or os.path.basename(image_path),
+            "verdict": "ERROR",
+            "overall_score": 0,
+            "error": "System busy - semaphore timeout",
+            "status": "error",
+            "timestamp": datetime.now().isoformat(),
+        }
+        with results_lock:
+            analysis_results[task_id] = error_result
+        db_mgr.save_result(error_result)
+        ipc_mgr.shared_memory.increment_errors()
+        ipc_mgr.shared_memory.decrement_active()
+        return error_result
 
     # ── Deadlock-safe resource acquisition ────────────
     resources_acquired = deadlock_handler.acquire_resources(
@@ -106,7 +164,23 @@ def analyze_image(image_path: str, task_id: str) -> dict:
     )
     if not resources_acquired:
         sync_mgr.release_analysis_slot()
-        return {"error": "Resource acquisition failed", "task_id": task_id}
+        error_result = {
+            "task_id": task_id,
+            "batch_id": batch_id,
+            "filename": filename or os.path.basename(image_path),
+            "verdict": "ERROR",
+            "overall_score": 0,
+            "error": "Resource acquisition failed",
+            "status": "error",
+            "timestamp": datetime.now().isoformat(),
+        }
+        with results_lock:
+            analysis_results[task_id] = error_result
+        db_mgr.save_result(error_result)
+        ipc_mgr.shared_memory.increment_errors()
+        ipc_mgr.shared_memory.decrement_active()
+        slot_acquired = False
+        return error_result
 
     try:
         # ── Stage 1: Preprocessing (Thread) ───────────
@@ -190,6 +264,8 @@ def analyze_image(image_path: str, task_id: str) -> dict:
         cache_key = f"result_{task_id}"
         result = {
             "task_id": task_id,
+            "batch_id": batch_id,
+            "filename": filename or os.path.basename(image_path),
             "verdict": verdict,
             "overall_score": round(overall_score, 1),
             "confidence": round(100 - overall_score, 1) if verdict == "REAL"
@@ -239,6 +315,7 @@ def analyze_image(image_path: str, task_id: str) -> dict:
         # ── Update shared results (with mutex) ────────
         with results_lock:
             analysis_results[task_id] = result
+        db_mgr.save_result(result)
 
         # ── Send result via IPC queue ─────────────────
         ipc_mgr.result_queue.send({"task_id": task_id, "verdict": verdict})
@@ -254,6 +331,8 @@ def analyze_image(image_path: str, task_id: str) -> dict:
         ipc_mgr.shared_memory.increment_errors()
         error_result = {
             "task_id": task_id,
+            "batch_id": batch_id,
+            "filename": filename or os.path.basename(image_path),
             "verdict": "ERROR",
             "overall_score": 0,
             "error": str(e),
@@ -262,14 +341,17 @@ def analyze_image(image_path: str, task_id: str) -> dict:
         }
         with results_lock:
             analysis_results[task_id] = error_result
+        db_mgr.save_result(error_result)
         return error_result
 
     finally:
         # ── Always release resources ──────────────────
-        deadlock_handler.release_resources(
-            ["image_buffer", "results_store", "log_file"]
-        )
-        sync_mgr.release_analysis_slot()
+        if resources_acquired:
+            deadlock_handler.release_resources(
+                ["image_buffer", "results_store", "log_file"]
+            )
+        if slot_acquired:
+            sync_mgr.release_analysis_slot()
         ipc_mgr.shared_memory.decrement_active()
 
 
@@ -277,10 +359,46 @@ def analyze_image(image_path: str, task_id: str) -> dict:
 #  API Routes
 # ══════════════════════════════════════════════════════════
 
+@app.after_request
+def add_security_headers(response):
+    """Apply baseline browser security headers."""
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()",
+    )
+    if request.is_secure:
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
+    return response
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(_error):
+    return jsonify({"error": "Uploaded file is too large."}), 413
+
+
 @app.route("/")
 def index():
     """Serve the main dashboard."""
     return render_template("index.html")
+
+
+@app.route("/healthz")
+def healthz():
+    """Deployment health endpoint for Render and other platforms."""
+    database = db_mgr.healthcheck()
+    ok = database.get("ok") is True
+    return jsonify({
+        "status": "ok" if ok else "degraded",
+        "database": database,
+        "model": get_model_status(),
+        "timestamp": datetime.now().isoformat(),
+    }), 200 if ok else 503
 
 
 @app.route("/api/analyze", methods=["POST"])
@@ -293,25 +411,27 @@ def analyze_single():
     if file.filename == "":
         return jsonify({"error": "No file selected"}), 400
 
-    if not file_mgr.is_allowed_file(file.filename):
-        return jsonify({"error": f"File type not allowed. Accepted: {config.ALLOWED_EXTENSIONS}"}), 400
+    try:
+        filepath = save_validated_upload(file)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
-    # Save upload
-    filepath = file_mgr.save_upload(file, file.filename)
-    task_id = str(uuid.uuid4())[:8]
+    task_id = uuid.uuid4().hex
 
     # Set initial status
+    initial_status = {
+        "task_id": task_id,
+        "status": "processing",
+        "filename": file.filename,
+        "timestamp": datetime.now().isoformat()
+    }
     with results_lock:
-        analysis_results[task_id] = {
-            "task_id": task_id,
-            "status": "processing",
-            "filename": file.filename,
-            "timestamp": datetime.now().isoformat()
-        }
+        analysis_results[task_id] = initial_status
+    db_mgr.save_initial(task_id, file.filename)
 
     # Run analysis in a thread
     def run():
-        analyze_image(filepath, task_id)
+        analyze_image(filepath, task_id, filename=file.filename)
 
     thread = threading.Thread(target=run, name=f"Analysis-{task_id}")
     thread.start()
@@ -328,47 +448,57 @@ def analyze_batch():
         return jsonify({"error": "No files provided"}), 400
 
     sync_mgr.reset_batch()
-    batch_id = str(uuid.uuid4())[:8]
+    batch_id = uuid.uuid4().hex[:12]
     task_ids = []
+    saved_items = []
+    rejected_files = []
 
     for file in files:
-        if file.filename and file_mgr.is_allowed_file(file.filename):
-            filepath = file_mgr.save_upload(file, file.filename)
-            task_id = f"{batch_id}_{str(uuid.uuid4())[:4]}"
-            task_ids.append(task_id)
+        if not file.filename:
+            continue
+        try:
+            filepath = save_validated_upload(file)
+        except ValueError as exc:
+            rejected_files.append({"filename": file.filename, "reason": str(exc)})
+            continue
 
-            with results_lock:
-                analysis_results[task_id] = {
-                    "task_id": task_id,
-                    "status": "processing",
-                    "filename": file.filename,
-                    "batch_id": batch_id
-                }
+        task_id = f"{batch_id}_{uuid.uuid4().hex[:8]}"
+        task_ids.append(task_id)
+        saved_items.append({
+            "task_id": task_id,
+            "filepath": filepath,
+            "filename": file.filename,
+        })
+
+        initial_status = {
+            "task_id": task_id,
+            "status": "processing",
+            "filename": file.filename,
+            "batch_id": batch_id,
+            "timestamp": datetime.now().isoformat(),
+        }
+        with results_lock:
+            analysis_results[task_id] = initial_status
+        db_mgr.save_initial(task_id, file.filename, batch_id=batch_id)
+
+    if not saved_items:
+        return jsonify({
+            "error": "No valid image files provided",
+            "rejected": rejected_files,
+        }), 400
 
     # Run batch in threads
     def run_batch():
         threads = []
-        for i, task_id in enumerate(task_ids):
-            filepath = None
-            with results_lock:
-                info = analysis_results.get(task_id, {})
-
-            file = files[i] if i < len(files) else None
-            if file and file.filename:
-                # File already saved above, get the path
-                import glob
-                pattern = os.path.join(config.UPLOAD_DIR, f"*_{file_mgr._sanitize_filename(file.filename)}")
-                matches = glob.glob(pattern)
-                if matches:
-                    filepath = matches[-1]
-
-            if filepath:
-                t = threading.Thread(
-                    target=analyze_image, args=(filepath, task_id),
-                    name=f"Batch-{task_id}"
-                )
-                threads.append(t)
-                t.start()
+        for item in saved_items:
+            task_id = item["task_id"]
+            t = threading.Thread(
+                target=analyze_image,
+                args=(item["filepath"], task_id, item["filename"], batch_id),
+                name=f"Batch-{task_id}"
+            )
+            threads.append(t)
+            t.start()
 
         for t in threads:
             t.join(timeout=120)
@@ -382,6 +512,7 @@ def analyze_batch():
         "batch_id": batch_id,
         "task_ids": task_ids,
         "count": len(task_ids),
+        "rejected": rejected_files,
         "status": "processing"
     }), 202
 
@@ -389,6 +520,9 @@ def analyze_batch():
 @app.route("/api/status/<task_id>")
 def get_status(task_id):
     """Get the status of an analysis task."""
+    if not is_valid_task_id(task_id):
+        return jsonify({"error": "Invalid task id"}), 400
+
     # Check cache first (Memory Management)
     cached = memory_mgr.cache.get(f"result_{task_id}")
     if cached:
@@ -398,7 +532,9 @@ def get_status(task_id):
         result = analysis_results.get(task_id)
 
     if result is None:
-        return jsonify({"error": "Task not found"}), 404
+        result = db_mgr.get_result(task_id)
+        if result is None:
+            return jsonify({"error": "Task not found"}), 404
 
     return jsonify(result)
 
@@ -406,11 +542,16 @@ def get_status(task_id):
 @app.route("/api/results/<task_id>")
 def get_results(task_id):
     """Get the full results of an analysis task."""
+    if not is_valid_task_id(task_id):
+        return jsonify({"error": "Invalid task id"}), 400
+
     with results_lock:
         result = analysis_results.get(task_id)
 
     if result is None:
-        return jsonify({"error": "Task not found"}), 404
+        result = db_mgr.get_result(task_id)
+        if result is None:
+            return jsonify({"error": "Task not found"}), 404
 
     return jsonify(result)
 
@@ -433,6 +574,9 @@ def get_os_stats():
 @app.route("/api/result-image/<task_id>/<analysis_type>")
 def get_result_image(task_id, analysis_type):
     """Serve a result image file."""
+    if not is_valid_task_id(task_id) or analysis_type not in ANALYSIS_IMAGE_TYPES:
+        return jsonify({"error": "Invalid result image request"}), 400
+
     filename = f"{task_id}_{analysis_type}.png"
     filepath = os.path.join(config.RESULTS_DIR, filename)
     if os.path.exists(filepath):
