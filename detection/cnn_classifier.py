@@ -147,7 +147,7 @@ def _heuristic_classify(image_path: str) -> np.ndarray:
     """
     img = cv2.imread(image_path)
     if img is None:
-        return np.array([0.33, 0.34, 0.33])
+        return np.array([0.34, 0.33, 0.33])
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float64)
 
@@ -161,7 +161,7 @@ def _heuristic_classify(image_path: str) -> np.ndarray:
 
     # Edge density
     edges = cv2.Canny(img, 50, 150)
-    edge_density = np.sum(edges > 0) / edges.size
+    edge_density = np.sum(edges > 0) / (edges.size + 1e-8)
 
     # Color channel correlation
     b, g, r = cv2.split(img)
@@ -190,6 +190,21 @@ def _heuristic_classify(image_path: str) -> np.ndarray:
         morphed_score += 0.1
         original_score -= 0.1
 
+    # AI Morph / Deepfake specific heuristics
+    # Morphed faces often have moderate laplacian variance (sharp edges like eyes) 
+    # but unusually balanced/smoothed noise profiles across the rest of the face.
+    if 5 < noise < 12 and edge_density < 0.12 and laplacian_var > 300:
+        morphed_score += 0.35
+        edited_score += 0.1
+        original_score -= 0.45
+
     # Normalize to probabilities
+    total = max(0.01, original_score + edited_score + morphed_score)
+    
+    # Ensure scores don't go below 0
+    original_score = max(0, original_score)
+    edited_score = max(0, edited_score)
+    morphed_score = max(0, morphed_score)
     total = original_score + edited_score + morphed_score
+
     return np.array([original_score / total, edited_score / total, morphed_score / total])

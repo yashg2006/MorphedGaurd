@@ -225,13 +225,18 @@ def analyze_image(
         # Weighted average
         weights = {"ela": 0.25, "noise": 0.15, "exif": 0.20,
                    "copy_move": 0.15, "cnn": 0.25}
-        overall_score = (
+        weighted_score = (
             ela_score * weights["ela"] +
             noise_score * weights["noise"] +
             exif_score * weights["exif"] +
             copy_move_score * weights["copy_move"] +
             cnn_score * weights["cnn"]
         )
+
+        # Boost score if any individual detector is highly confident.
+        # This fixes the issue where irrelevant zeroes (e.g., no copy-move) dilute a strong CNN/ELA detection.
+        max_individual_score = max(ela_score, noise_score, exif_score, copy_move_score, cnn_score)
+        overall_score = max(weighted_score, (weighted_score * 0.4) + (max_individual_score * 0.6))
 
         # Classification
         if overall_score >= config.FAKE_THRESHOLD:

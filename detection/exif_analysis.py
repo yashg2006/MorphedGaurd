@@ -40,8 +40,8 @@ def perform_exif_analysis(image_path: str) -> dict:
 
     if exif_data is None:
         flags.append("NO_EXIF_DATA")
-        score += 15  # Reduced from 25: digital certificates legitimately lack EXIF
-        metadata["warning"] = "No EXIF data found — common for digital certificates or screenshots"
+        score += 65  # Severely increased: Morphed/AI faces almost always strip ALL EXIF
+        metadata["warning"] = "No EXIF data found — common for digitally generated or stripped morphed images"
     else:
         for tag_id, value in exif_data.items():
             tag_name = TAGS.get(tag_id, str(tag_id))
@@ -80,7 +80,7 @@ def perform_exif_analysis(image_path: str) -> dict:
     # ── Check for missing camera info ─────────────────
     if exif_data and not metadata.get("Make") and not metadata.get("Model"):
         flags.append("NO_CAMERA_INFO")
-        score += 5  # Reduced from 10: digital certificates don't have camera models
+        score += 20  # Increased because real camera photos usually have this
 
     # ── Check thumbnail presence ──────────────────────
     if exif_data and not metadata.get("JPEGThumbnail") and not metadata.get("ThumbnailImage"):
